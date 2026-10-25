@@ -213,19 +213,9 @@ math{font-size:1.15em}.katex-display{margin:.6em 0;overflow-x:auto}
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="busy-overlay" class="busy-overlay" hidden role="status" aria-live="assertive" aria-atomic="true"><div class="busy-panel"><div class="busy-spinner" aria-hidden="true"></div><div class="busy-title" data-busy-title>Đang xử lý…</div><div class="busy-sub" data-busy-sub>Vui lòng đợi trong giây lát, đừng đóng trang.</div><div class="busy-pulse" aria-hidden="true"><i></i><i></i><i></i></div></div></div>
 <script>
-// Standalone website: invite codes are read from the hosted URL (e.g. ?join=12345678).
-const SERVER_JOIN_CODE = (() => {
-  try {
-    const raw = new URLSearchParams(window.location.search || '').get('join') || '';
-    const digits = String(raw).replace(/\D/g, '');
-    return /^\d{8}$/.test(digits) ? digits : '';
-  } catch (e) { return ''; }
-})();
-window.QUIZLAB_EXTERNAL_HOSTING = true;
-function getPublicAppBaseUrl(){
-  try { const u = new URL(window.location.href); u.search = ''; u.hash = ''; return u.href; }
-  catch (e) { return ''; }
-}
+// Injected by doGet(e), so the join code survives Apps Script URL redirects.
+const SERVER_JOIN_CODE = '<?= joinCodeFromUrl ?>';
+const SERVER_EXPORT_OWNER_KEY = '<?= exportOwnerKey ?>';
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 let LANG=(()=>{try{return localStorage.getItem('quizlab_lang')==='en'?'en':'vi'}catch(e){return 'vi'}})();
@@ -465,19 +455,7 @@ async function delOnline(id){if(!ON.db){ON.metas=ON.metas.filter(m=>m.id!==id);r
 async function begin(z,mode,nm,sh){if(!z.questions){try{if(ON.gas){z={...z,questions:await gasQuestions(z.id,z.aid||'')}}else{const s=await ON.db.collection('quizzes/'+z.id+'/q').get();z={...z,questions:s.docs.map(d=>d.data()).sort((a,b)=>a.order-b.order)}}}catch(e){return toast('Không tải được đề: '+(e.message||''))}}
 if(!z.questions.length)return toast('Đề này chưa có câu hỏi');start(shuf(z,sh),mode,nm);V.org={z,sh}}
 function confetti(){if(matchMedia('(prefers-reduced-motion:reduce)').matches)return;const w=document.createElement('div');w.className='cf';w.setAttribute('aria-hidden','true');for(let i=0;i<46;i++){const s=document.createElement('i');s.style.cssText=`left:${Math.random()*100}%;background:${['#f26a21','#1f9d63','#3b82f6','#f59e0b','#ec4899'][i%5]};animation-delay:${Math.random()*.8}s;animation-duration:${2+Math.random()*1.6}s`;w.appendChild(s)}document.body.appendChild(w);setTimeout(()=>w.remove(),4500)}
-async function gasCall(name,...args){
- const endpoint='/.netlify/functions/quizlab-api';
- let response;
- try {
-  response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,args}),cache:'no-store'});
- } catch(e) { throw new Error('Không kết nối được máy chủ Quiz Lab. Hãy kiểm tra cấu hình Netlify và kết nối mạng.'); }
- let payload;
- try { payload=await response.json(); }
- catch(e) { throw new Error('Máy chủ trả về dữ liệu không hợp lệ. Hãy kiểm tra URL Apps Script và cấu hình Netlify.'); }
- if(!response.ok) throw new Error(payload&&payload.error||('Lỗi máy chủ ('+response.status+').'));
- if(!payload || payload.ok!==true) throw new Error(payload&&payload.error||'Yêu cầu không thành công.');
- return payload.value;
-}
+function gasCall(name,...args){return new Promise((resolve,reject)=>{try{google.script.run.withSuccessHandler(resolve).withFailureHandler(e=>reject(new Error(e&&e.message||String(e))))[name](...args)}catch(e){reject(e)}})}
 function makeGasDb(){return {
  collection:path=>({
   get:async()=>{const rows=await gasCall('quizLabApiList',path,ON.teacherKey);return {docs:(rows||[]).map(x=>({id:x.id,data:()=>({...x})}))}},
@@ -523,26 +501,12 @@ async function init(){
  }
  try{
   try{
-   if(window.QUIZLAB_EXTERNAL_HOSTING || (typeof google!=='undefined'&&google.script&&google.script.run)){
+   if(typeof google!=='undefined'&&google.script&&google.script.run){
     ON.gas=true;ON.db=makeGasDb();ON.teacherKey=getQuizLabOwnerKey();ON.edit=true;
-    // Share the public static-site URL, not the Apps Script backend URL.
-    ON.webAppUrl=getPublicAppBaseUrl();
-    // Optional one-time transfer from the old Apps Script origin: open the site with ?migrateOwner=1.
-    try{
-     const migrateRequested=new URLSearchParams(location.search||'').get('migrateOwner')==='1';
-     if(migrateRequested && localStorage.getItem('quizlab_owner_migration_v1')!=='done'){
-      const oldOwner=window.prompt('Dán mã quản lý cũ (64 ký tự) đã sao chép từ website Apps Script cũ. Nếu chưa sao chép, hãy hủy và mở URL cũ với ?exportOwnerKey=1.');
-      if(oldOwner && oldOwner.trim()){
-       const moved=await gasCall('quizLabApiMigrateOwner',oldOwner.trim(),ON.teacherKey);
-       if(Number(moved)>0){
-        localStorage.setItem('quizlab_owner_migration_v1','done');
-        toast('Đã chuyển quyền quản lý cho '+Number(moved)+' bản ghi. Hãy tải lại thư viện đề.');
-       }else{
-        toast('Không tìm thấy đề/bài giao thuộc mã cũ này. Hãy kiểm tra mã đã sao chép từ đúng trình duyệt cũ.');
-       }
-      }
-     }
-    }catch(migrationError){toast('Chưa chuyển được dữ liệu cũ: '+(migrationError.message||String(migrationError)));}
+    if(String(SERVER_EXPORT_OWNER_KEY||'')==='1'){
+     setTimeout(()=>window.prompt('Sao chép mã quản lý cũ gồm 64 ký tự này để chuyển đề và bài giao sang website mới. Không gửi mã này cho người khác.',ON.teacherKey),350);
+    }
+    try{ON.webAppUrl=await gasCall('quizLabApiGetWebAppUrl')}catch(urlError){ON.webAppUrl='';console.warn('Quiz Lab deployment URL is unavailable:',urlError)}
     // Transfer older single-teacher content if this browser still has the former private key.
     try{
      const oldPin=localStorage.getItem('quizlab_teacher_pin')||'';
@@ -736,9 +700,12 @@ const loc=ms=>new Date(ms-new Date(ms).getTimezoneOffset()*6e4).toISOString().sl
 function joinLink(c){
  let base='';
  if(ON.gas){
-  // Public invite links point to the standalone website; Apps Script is only the backend.
-  base=String(ON.webAppUrl||getPublicAppBaseUrl()).split('#')[0].split('?')[0];
-  if(!/^https?:\/\//i.test(base))return '';
+  base=String(ON.webAppUrl||'').split('#')[0].split('?')[0];
+  if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(base)){
+   const current=String(location.href||'').split('#')[0].split('?')[0];
+   if(/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(current))base=current;
+   else return '';
+  }
  }else if(ON.db)base='https://claude.ai/artifact/M5FLSxVYxcThDRAGbVijFD';
  else base=location.href.split('#')[0].split('?')[0];
  return base+'?join='+encodeURIComponent(String(c));
@@ -841,7 +808,7 @@ ${sw('late','Cho phép nộp muộn','Sau hạn học sinh vẫn làm được, 
 <h2 style="margin-top:18px">Cài đặt chính</h2>${row('Số lượt làm bài',four('attempts'))}${p?row('Đưa câu sai trở lại sau',pl('reviewDelay',2,'2 câu')+pl('reviewDelay',3,'3 câu')+pl('reviewDelay',4,'4 câu')+pl('reviewDelay','end','Không giới hạn'))+'<p class="mu">Mọi câu trả lời sai sẽ được đưa trở lại cho đến khi trả lời đúng. “Không giới hạn” sẽ đợi đến lượt ôn ở cuối vòng câu hỏi ban đầu.</p>':''}${A.attempts?'<p class="mu">Số lượt được tính theo tên hiển thị (hoặc mã ẩn danh nếu bật ẩn danh).</p>':''}</section>
 <h2>Thêm cài đặt</h2><div class="tabs" role="tablist">${tb('o','Tổng quan')}${tb('m','Làm chủ')}${tb('g','Game hóa')}</div><section class="card">${panel}</section>
 <button class="btn or" style="width:100%" data-a="agive">Giao bài</button>`}
-function vAssigned(){const a=ON.asg.find(x=>x.id===V.assignedId)||V.a;if(!a)return '<div class="card"><h2>Không tìm thấy bài vừa giao</h2><button class="btn" data-a="go" data-p="lib">Về thư viện đề</button></div>';const link=joinLink(a.id),linkMissing=!link,localHint=linkMissing&&ON.gas?'<p class="erc">Chưa xác định được địa chỉ website công khai. Hãy mở Quiz Lab từ URL Netlify đã triển khai rồi thử lại.</p>':(!ON.db&&location.protocol==='file:'?'<p class="mu">Lưu ý: đang mở file trực tiếp từ máy tính. Liên kết này chỉ mở được trên máy có file; muốn học sinh dùng thiết bị khác, hãy đăng tải trang lên một địa chỉ web trước.</p>':'');return `<div class="hd"><div><h1>Đã giao bài thành công</h1><p class="mu">${esc(a.title)} · chế độ ${modeLabel(a.mode)}</p></div><div class="acts"><button class="btn" data-a="go" data-p="lib">Về thư viện</button><button class="btn or" data-a="rgo" data-f="${a.id}">Xem báo cáo</button></div></div><div class="grid"><section class="card"><h2>Mã tham gia</h2><p class="mu">Học sinh nhập mã này ở trang chủ.</p><input id="d-code" class="codebig" readonly aria-label="Mã tham gia" value="${fmtCode(a.id)}" style="width:100%;padding:12px;border:1px solid var(--bd);border-radius:12px;background:var(--card)"><div class="acts" style="margin-top:12px"><button class="btn or" data-a="cpy" data-t="code">Sao chép mã</button></div></section><section class="card"><h2>Mã QR</h2><div class="qrbox">${link?qrSvg(link):'<p class=\"erc\">Chưa có link Web app /exec để tạo QR.</p>'}</div><p class="mu" style="text-align:center">Quét QR để mở trang tham gia.</p><div class="acts"><button class="btn" data-a="qr" data-id="${a.id}"${linkMissing?' disabled':''}>Mở QR lớn</button></div></section><section class="card"><h2>Liên kết tham gia</h2><p class="mu">Gửi liên kết để học sinh mở trực tiếp bài tập.</p><input id="d-link" readonly aria-label="Liên kết tham gia" value="${esc(link)}" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:12px;background:var(--card)"><div class="acts" style="margin-top:12px"><button class="btn or" data-a="cpy" data-t="link"${linkMissing?' disabled':''}>Sao chép liên kết</button><button class="btn" data-a="rgo" data-f="${a.id}">Xem báo cáo</button></div></section></div>${localHint}<section class="card" style="margin-top:16px"><h2>Bước tiếp theo</h2><p class="mu">Bạn có thể theo dõi danh sách người tham gia, điểm và thời gian làm bài trong trang báo cáo. ${a.anon?'Chế độ ẩn danh đang bật; báo cáo không lưu tên thật.':'Báo cáo ghi nhận tên hiển thị học sinh đã nhập.'} Báo cáo tự làm mới định kỳ khi có kết quả mới.</p><button class="btn or" data-a="rgo" data-f="${a.id}">Mở báo cáo bài này</button></section>`}
+function vAssigned(){const a=ON.asg.find(x=>x.id===V.assignedId)||V.a;if(!a)return '<div class="card"><h2>Không tìm thấy bài vừa giao</h2><button class="btn" data-a="go" data-p="lib">Về thư viện đề</button></div>';const link=joinLink(a.id),linkMissing=!link,localHint=linkMissing&&ON.gas?'<p class="erc">Chưa lấy được URL triển khai. Hãy dùng Deploy → Manage deployments và mở Web app URL kết thúc bằng /exec rồi thử lại.</p>':(!ON.db&&location.protocol==='file:'?'<p class="mu">Lưu ý: đang mở file trực tiếp từ máy tính. Liên kết này chỉ mở được trên máy có file; muốn học sinh dùng thiết bị khác, hãy đăng tải trang lên một địa chỉ web trước.</p>':'');return `<div class="hd"><div><h1>Đã giao bài thành công</h1><p class="mu">${esc(a.title)} · chế độ ${modeLabel(a.mode)}</p></div><div class="acts"><button class="btn" data-a="go" data-p="lib">Về thư viện</button><button class="btn or" data-a="rgo" data-f="${a.id}">Xem báo cáo</button></div></div><div class="grid"><section class="card"><h2>Mã tham gia</h2><p class="mu">Học sinh nhập mã này ở trang chủ.</p><input id="d-code" class="codebig" readonly aria-label="Mã tham gia" value="${fmtCode(a.id)}" style="width:100%;padding:12px;border:1px solid var(--bd);border-radius:12px;background:var(--card)"><div class="acts" style="margin-top:12px"><button class="btn or" data-a="cpy" data-t="code">Sao chép mã</button></div></section><section class="card"><h2>Mã QR</h2><div class="qrbox">${link?qrSvg(link):'<p class=\"erc\">Chưa có link Web app /exec để tạo QR.</p>'}</div><p class="mu" style="text-align:center">Quét QR để mở trang tham gia.</p><div class="acts"><button class="btn" data-a="qr" data-id="${a.id}"${linkMissing?' disabled':''}>Mở QR lớn</button></div></section><section class="card"><h2>Liên kết tham gia</h2><p class="mu">Gửi liên kết để học sinh mở trực tiếp bài tập.</p><input id="d-link" readonly aria-label="Liên kết tham gia" value="${esc(link)}" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:12px;background:var(--card)"><div class="acts" style="margin-top:12px"><button class="btn or" data-a="cpy" data-t="link"${linkMissing?' disabled':''}>Sao chép liên kết</button><button class="btn" data-a="rgo" data-f="${a.id}">Xem báo cáo</button></div></section></div>${localHint}<section class="card" style="margin-top:16px"><h2>Bước tiếp theo</h2><p class="mu">Bạn có thể theo dõi danh sách người tham gia, điểm và thời gian làm bài trong trang báo cáo. ${a.anon?'Chế độ ẩn danh đang bật; báo cáo không lưu tên thật.':'Báo cáo ghi nhận tên hiển thị học sinh đã nhập.'} Báo cáo tự làm mới định kỳ khi có kết quả mới.</p><button class="btn or" data-a="rgo" data-f="${a.id}">Mở báo cáo bài này</button></section>`}
 function vReport(){
 const head=(t,x,b)=>`<div class="hd"><div><h1>${esc(t)}</h1><p class="mu">${x}</p></div><div class="acts">${b||''}</div></div>`;
 const rf='<button class="btn" data-a="rfresh">Làm mới</button>';
