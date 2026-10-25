@@ -213,9 +213,19 @@ math{font-size:1.15em}.katex-display{margin:.6em 0;overflow-x:auto}
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <div id="busy-overlay" class="busy-overlay" hidden role="status" aria-live="assertive" aria-atomic="true"><div class="busy-panel"><div class="busy-spinner" aria-hidden="true"></div><div class="busy-title" data-busy-title>Đang xử lý…</div><div class="busy-sub" data-busy-sub>Vui lòng đợi trong giây lát, đừng đóng trang.</div><div class="busy-pulse" aria-hidden="true"><i></i><i></i><i></i></div></div></div>
 <script>
-// Injected by doGet(e), so the join code survives Apps Script URL redirects.
-const SERVER_JOIN_CODE = '<?= joinCodeFromUrl ?>';
-const SERVER_EXPORT_OWNER_KEY = '<?= exportOwnerKey ?>';
+// Standalone website: invite codes are read from the hosted URL (e.g. ?join=12345678).
+const SERVER_JOIN_CODE = (() => {
+  try {
+    const raw = new URLSearchParams(window.location.search || '').get('join') || '';
+    const digits = String(raw).replace(/\D/g, '');
+    return /^\d{8}$/.test(digits) ? digits : '';
+  } catch (e) { return ''; }
+})();
+window.QUIZLAB_EXTERNAL_HOSTING = true;
+function getPublicAppBaseUrl(){
+  try { const u = new URL(window.location.href); u.search = ''; u.hash = ''; return u.href; }
+  catch (e) { return ''; }
+}
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 
 let LANG=(()=>{try{return localStorage.getItem('quizlab_lang')==='en'?'en':'vi'}catch(e){return 'vi'}})();
@@ -390,6 +400,7 @@ const matchSA=(u,ans)=>{
 };
 
 let S={quizzes:[],draft:[],liveAsg:[],liveAtt:[],livePlayers:[]},V={p:'home'},T=null,RP=null;
+let EDITING_PUBLISHED_ID='', EDITING_PUBLISHED_META=null, EDITING_PUBLISHED_DRAFT_BACKUP=null, EDITING_PUBLISHED_CACHE_BACKUP=null;
 const ON={db:null,edit:true,gas:false,teacherKey:'',webAppUrl:'',metas:[],att:[],asg:[],pl:[]};
 try{S=Object.assign(S,JSON.parse(localStorage.getItem('quizlab')||'{}'))}catch(e){}
 S.liveAsg=S.liveAsg||[];S.liveAtt=S.liveAtt||[];S.livePlayers=S.livePlayers||[];
@@ -398,7 +409,8 @@ const save=()=>{try{localStorage.setItem('quizlab',JSON.stringify(S))}catch(e){t
 function toast(m){const t=document.getElementById('toast');t.textContent=translateText(m);t.classList.add('on');clearTimeout(toast.h);toast.h=setTimeout(()=>t.classList.remove('on'),2600)}
 let QUIZLAB_BUSY=false;
 function busyMessage(action){const m={
- dopub:['Đang xuất bản đề…','Publishing quiz…'],
+ dopub:[EDITING_PUBLISHED_ID?'Đang lưu thay đổi đề…':'Đang xuất bản đề…',EDITING_PUBLISHED_ID?'Saving quiz changes…':'Publishing quiz…'],
+ editpubgo:['Đang tải đề để chỉnh sửa…','Loading quiz for editing…'],
  assign:['Đang chuẩn bị giao bài…','Preparing assignment…'],
  agive:['Đang giao bài và tạo mã tham gia…','Assigning quiz and creating join code…'],
  join:['Đang tìm bài theo mã…','Looking up quiz code…'],
@@ -436,6 +448,26 @@ function shuf(z,sh){if(!sh||(!sh.q&&!sh.o))return z;const qs=z.questions.map(q=>
 const totalT=z=>z.questions.reduce((s,q)=>s+q.time,0);
 function shrink(file){return new Promise((ok,no)=>{const r=new FileReader();r.onerror=no;r.onload=()=>{const im=new Image();im.onerror=no;im.onload=()=>{const k=Math.min(1,720/Math.max(im.width,im.height)),c=document.createElement('canvas'),x=c.getContext('2d');c.width=Math.round(im.width*k);c.height=Math.round(im.height*k);x.fillStyle='#fff';x.fillRect(0,0,c.width,c.height);x.drawImage(im,0,0,c.width,c.height);ok(c.toDataURL('image/jpeg',.72))};im.src=r.result};r.readAsDataURL(file)})}
 async function loadMetas(){if(!ON.db){refreshLocal();ON.metas=(S.quizzes||[]).map(z=>clone(z)).sort((a,b)=>(b.created||0)-(a.created||0));return}try{const s=await ON.db.collection('quizzes').get();ON.metas=s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(b.created||0)-(a.created||0))}catch(e){}}
+async function loadPublishedForEdit(id){
+ if(!ON.edit)return toast('Bạn không có quyền chỉnh sửa đề này.');
+ id=String(id||'');if(!id)return toast('Không xác định được đề cần sửa.');
+ try{
+  await loadMetas();
+  const meta=ON.metas.find(x=>String(x.id)===id)||S.quizzes.find(x=>String(x.id)===id);
+  if(!meta)throw new Error('Không tìm thấy đề đã xuất bản. Hãy làm mới Thư viện đề.');
+  let questions=[];
+  if(Array.isArray(meta.questions)&&meta.questions.length)questions=clone(meta.questions);
+  else if(ON.gas)questions=await gasQuestions(id,'');
+  else if(ON.db){const qres=await ON.db.collection('quizzes/'+id+'/q').get();questions=qres.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>(a.order||0)-(b.order||0));}
+  if(!Array.isArray(questions)||!questions.length)throw new Error('Đề chưa có câu hỏi hoặc chưa tải được câu hỏi.');
+  EDITING_PUBLISHED_ID=id;
+  EDITING_PUBLISHED_META=clone(meta);
+  EDITING_PUBLISHED_DRAFT_BACKUP=clone(S.draft||[]);
+  EDITING_PUBLISHED_CACHE_BACKUP=clone(S.quizzes.find(x=>String(x.id)===id)||null);
+  S.draft=clone(questions);save();V.dlg=null;go('review');
+  toast('Đã tải đề để chỉnh sửa. Bấm “Lưu thay đổi” để cập nhật đề đã xuất bản.');
+ }catch(e){toast('Không mở được đề để chỉnh sửa: '+(e&&e.message||String(e)));}
+}
 async function loadAtt(){if(!ON.db){refreshLocal();ON.att=clone(S.liveAtt||[]).sort((a,b)=>b.at-a.at);return}try{const s=await ON.db.collection('attempts').get();ON.att=s.docs.map(d=>({id:d.id,...d.data()})).sort((a,b)=>b.at-a.at)}catch(e){toast('Không tải được báo cáo')}}
 async function pushOnline(z){
  if(ON.gas){
@@ -445,7 +477,7 @@ async function pushOnline(z){
    const payload={...z,n:questions.length,tot:totalT(z),questions};
    z.n=payload.n;z.tot=payload.tot;save();
    await gasCall('quizLabApiSaveQuiz',payload,ON.teacherKey);
-   await loadMetas();toast('Đã phát đề online cho học sinh');render();return true;
+   await loadMetas();toast('Đã lưu đề online cho học sinh');render();return true;
   }catch(e){toast('Chưa phát online được: '+((e&&e.message)||'lỗi'));return false}
  }
  if(!ON.db){save();ON.metas=(S.quizzes||[]).map(x=>clone(x));return true}
@@ -455,7 +487,19 @@ async function delOnline(id){if(!ON.db){ON.metas=ON.metas.filter(m=>m.id!==id);r
 async function begin(z,mode,nm,sh){if(!z.questions){try{if(ON.gas){z={...z,questions:await gasQuestions(z.id,z.aid||'')}}else{const s=await ON.db.collection('quizzes/'+z.id+'/q').get();z={...z,questions:s.docs.map(d=>d.data()).sort((a,b)=>a.order-b.order)}}}catch(e){return toast('Không tải được đề: '+(e.message||''))}}
 if(!z.questions.length)return toast('Đề này chưa có câu hỏi');start(shuf(z,sh),mode,nm);V.org={z,sh}}
 function confetti(){if(matchMedia('(prefers-reduced-motion:reduce)').matches)return;const w=document.createElement('div');w.className='cf';w.setAttribute('aria-hidden','true');for(let i=0;i<46;i++){const s=document.createElement('i');s.style.cssText=`left:${Math.random()*100}%;background:${['#f26a21','#1f9d63','#3b82f6','#f59e0b','#ec4899'][i%5]};animation-delay:${Math.random()*.8}s;animation-duration:${2+Math.random()*1.6}s`;w.appendChild(s)}document.body.appendChild(w);setTimeout(()=>w.remove(),4500)}
-function gasCall(name,...args){return new Promise((resolve,reject)=>{try{google.script.run.withSuccessHandler(resolve).withFailureHandler(e=>reject(new Error(e&&e.message||String(e))))[name](...args)}catch(e){reject(e)}})}
+async function gasCall(name,...args){
+ const endpoint='/.netlify/functions/quizlab-api';
+ let response;
+ try {
+  response=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name,args}),cache:'no-store'});
+ } catch(e) { throw new Error('Không kết nối được máy chủ Quiz Lab. Hãy kiểm tra cấu hình Netlify và kết nối mạng.'); }
+ let payload;
+ try { payload=await response.json(); }
+ catch(e) { throw new Error('Máy chủ trả về dữ liệu không hợp lệ. Hãy kiểm tra URL Apps Script và cấu hình Netlify.'); }
+ if(!response.ok) throw new Error(payload&&payload.error||('Lỗi máy chủ ('+response.status+').'));
+ if(!payload || payload.ok!==true) throw new Error(payload&&payload.error||'Yêu cầu không thành công.');
+ return payload.value;
+}
 function makeGasDb(){return {
  collection:path=>({
   get:async()=>{const rows=await gasCall('quizLabApiList',path,ON.teacherKey);return {docs:(rows||[]).map(x=>({id:x.id,data:()=>({...x})}))}},
@@ -501,12 +545,26 @@ async function init(){
  }
  try{
   try{
-   if(typeof google!=='undefined'&&google.script&&google.script.run){
+   if(window.QUIZLAB_EXTERNAL_HOSTING || (typeof google!=='undefined'&&google.script&&google.script.run)){
     ON.gas=true;ON.db=makeGasDb();ON.teacherKey=getQuizLabOwnerKey();ON.edit=true;
-    if(String(SERVER_EXPORT_OWNER_KEY||'')==='1'){
-     setTimeout(()=>window.prompt('Sao chép mã quản lý cũ gồm 64 ký tự này để chuyển đề và bài giao sang website mới. Không gửi mã này cho người khác.',ON.teacherKey),350);
-    }
-    try{ON.webAppUrl=await gasCall('quizLabApiGetWebAppUrl')}catch(urlError){ON.webAppUrl='';console.warn('Quiz Lab deployment URL is unavailable:',urlError)}
+    // Share the public static-site URL, not the Apps Script backend URL.
+    ON.webAppUrl=getPublicAppBaseUrl();
+    // Optional one-time transfer from the old Apps Script origin: open the site with ?migrateOwner=1.
+    try{
+     const migrateRequested=new URLSearchParams(location.search||'').get('migrateOwner')==='1';
+     if(migrateRequested && localStorage.getItem('quizlab_owner_migration_v1')!=='done'){
+      const oldOwner=window.prompt('Dán mã quản lý cũ (64 ký tự) đã sao chép từ website Apps Script cũ. Nếu chưa sao chép, hãy hủy và mở URL cũ với ?exportOwnerKey=1.');
+      if(oldOwner && oldOwner.trim()){
+       const moved=await gasCall('quizLabApiMigrateOwner',oldOwner.trim(),ON.teacherKey);
+       if(Number(moved)>0){
+        localStorage.setItem('quizlab_owner_migration_v1','done');
+        toast('Đã chuyển quyền quản lý cho '+Number(moved)+' bản ghi. Hãy tải lại thư viện đề.');
+       }else{
+        toast('Không tìm thấy đề/bài giao thuộc mã cũ này. Hãy kiểm tra mã đã sao chép từ đúng trình duyệt cũ.');
+       }
+      }
+     }
+    }catch(migrationError){toast('Chưa chuyển được dữ liệu cũ: '+(migrationError.message||String(migrationError)));}
     // Transfer older single-teacher content if this browser still has the former private key.
     try{
      const oldPin=localStorage.getItem('quizlab_teacher_pin')||'';
@@ -540,7 +598,7 @@ async function init(){
  }
 }
 const blank=t=>t==='mc'?{id:uid(),type:'mc',text:'',options:['','','',''],correct:0,time:60,points:1,explain:''}:t==='tf'?{id:uid(),type:'tf',passage:'',items:[0,1,2,3].map(()=>({text:'',answer:true})),time:90,points:1,explain:''}:{id:uid(),type:'sa',text:'',answer:'',time:60,points:1,explain:''};
-function go(p,x={}){clearInterval(T);if(p!=='play')stopMusic(false);V=Object.assign({p},x);render();scrollTo(0,0)}
+function go(p,x={}){if(EDITING_PUBLISHED_ID&&p!=='review'&&p!=='edit'){S.draft=clone(EDITING_PUBLISHED_DRAFT_BACKUP||[]);EDITING_PUBLISHED_ID='';EDITING_PUBLISHED_META=null;EDITING_PUBLISHED_DRAFT_BACKUP=null;EDITING_PUBLISHED_CACHE_BACKUP=null;save()}clearInterval(T);if(p!=='play')stopMusic(false);V=Object.assign({p},x);render();scrollTo(0,0)}
 
 /* ---------- Khung chung ---------- */
 const QLICON={
@@ -564,7 +622,7 @@ const menu=l=>`<div class="mw"><button class="btn or" data-a="menu" aria-haspopu
 function vLib(){const d=S.draft.length;
 return `<div class="hd" data-tour="library-header"><div><h1>Thư viện đề</h1><p class="mu">Các đề đã xuất bản. Bấm “Giao bài” để gửi đề cho học sinh.</p></div><div class="acts">${menu('Tạo mới')}</div></div>`+coachBubble('library',uiText('Khu vực quản lý đề','Quiz library'),uiText('Tại đây bạn xem các đề đã xuất bản, mở thử Kiểm tra hoặc Luyện tập, và giao bài cho học sinh.','Here you can view published quizzes, preview Test or Practice, and assign work to students.'))
 +(d&&ON.edit?`<div class="card bn"><span>Bạn có đề nháp với <b>${d} câu</b> chưa xuất bản.</span><button class="btn" data-a="go" data-p="review">Xem lại và xuất bản</button></div>`:'')
-+(allQ().length?`<div class="grid" data-tour="library-grid">${allQ().map(z=>{const st=SS(z.subject);return `<article class="card qc"><div class="qh" style="--c1:${st[1]};--c2:${st[2]}" aria-hidden="true">${st[0]}</div><div class="qbd"><div class="chips"><span class="chip">${esc(z.subject)}</span><span class="chip">Lớp ${esc(z.grade)}</span></div><h2>${esc(z.title)}</h2><p class="mu">${z.n||z.questions.length} câu · ${fmtT(z.tot||totalT(z))} phút</p><div class="acts">${ON.edit?`<button class="btn or" data-a="assign" data-id="${z.id}">Giao bài</button>`:''}<button class="btn" data-a="play" data-id="${z.id}" data-mode="s">Thử Kiểm tra</button><button class="btn" data-a="play" data-id="${z.id}" data-mode="p">Mở Luyện tập</button>${ON.edit?`<button class="btn" data-a="delq" data-c="1" data-id="${z.id}">Xóa</button>`:''}</div></div></article>`}).join('')}</div>`
++(allQ().length?`<div class="grid" data-tour="library-grid">${allQ().map(z=>{const st=SS(z.subject);return `<article class="card qc"><div class="qh" style="--c1:${st[1]};--c2:${st[2]}" aria-hidden="true">${st[0]}</div><div class="qbd"><div class="chips"><span class="chip">${esc(z.subject)}</span><span class="chip">Lớp ${esc(z.grade)}</span></div><h2>${esc(z.title)}</h2><p class="mu">${z.n||z.questions.length} câu · ${fmtT(z.tot||totalT(z))} phút</p><div class="acts">${ON.edit?`<button class="btn or" data-a="assign" data-id="${z.id}">Giao bài</button><button class="btn" data-a="editpub" data-id="${z.id}">Sửa đề</button>`:''}<button class="btn" data-a="play" data-id="${z.id}" data-mode="s">Thử Kiểm tra</button><button class="btn" data-a="play" data-id="${z.id}" data-mode="p">Mở Luyện tập</button>${ON.edit?`<button class="btn" data-a="delq" data-c="1" data-id="${z.id}">Xóa</button>`:''}</div></div></article>`}).join('')}</div>`
 :`<div class="card"><h2>Chưa có đề nào được xuất bản</h2><p class="mu">${ON.edit?'Bấm “+ Tạo mới” để soạn câu hỏi, hoặc dùng mục Nhập câu hỏi ở thanh bên.':'Giáo viên chưa phát đề nào. Hãy quay lại sau nhé!'}</p></div>`)}
 
 /* ---------- 2. Soạn câu hỏi ---------- */
@@ -584,8 +642,8 @@ else{q.passage=rv('e-text');q.items=[...document.querySelectorAll('.irow')].map(
 q.time=+g('e-time').value||60;q.points=+g('e-pts').value||1;q.explain=g('e-exp').value.trim()}
 function check(q){if(q.type==='mc'){if(!richPlain(q.text))return'Hãy nhập nội dung câu hỏi.';if(q.options.some(o=>!richPlain(o)))return'Cần nhập đủ 4 đáp án.'}else if(q.type==='sa'){if(!richPlain(q.text))return'Hãy nhập nội dung câu hỏi.';if(!q.answer)return'Hãy nhập đáp án đúng.'}else{if(!richPlain(q.passage))return'Hãy nhập đoạn văn.';if(q.items.length<2)return'Cần ít nhất 2 mệnh đề.';if(q.items.some(i=>!richPlain(i.text)))return'Có mệnh đề còn trống.'}return q.time<5?'Thời gian tối thiểu là 5 giây.':''}
 /* ---------- 3. Xem lại + Xuất bản ---------- */
-function vReview(){const d=S.draft,tt=d.reduce((s,q)=>s+q.time,0);
-return `<div class="hd"><div><h1>Bản nháp đang soạn</h1><p class="mu">${d.length} câu · ${fmtT(tt)} phút</p></div><div class="acts">${menu('Thêm câu')}<button class="btn or" data-a="pub"${d.length?'':' disabled'}>Xuất bản</button></div></div>`+coachBubble('review',uiText('Kiểm tra bản nháp trước khi xuất bản','Review your draft before publishing'),uiText('Bạn có thể đổi thứ tự câu, sửa nội dung, nhân đôi hoặc xóa câu. Khi hoàn tất, chọn Xuất bản để đặt tên đề và môn học.','Reorder, edit, duplicate, or delete questions here. When ready, choose Publish to name the quiz and set its subject.'))
+function vReview(){const d=S.draft,tt=d.reduce((s,q)=>s+q.time,0),editingPublished=!!EDITING_PUBLISHED_ID;
+return `<div class="hd"><div><h1>${editingPublished?'Chỉnh sửa đề đã xuất bản':'Bản nháp đang soạn'}</h1><p class="mu">${d.length} câu · ${fmtT(tt)} phút${editingPublished?' · Đề gốc sẽ được cập nhật khi bạn lưu.':''}</p></div><div class="acts">${menu('Thêm câu')}${editingPublished?`<button class="btn" data-a="canceleditpub">Hủy chỉnh sửa</button>`:''}<button class="btn or" data-a="pub"${d.length?'':' disabled'}>${editingPublished?'Lưu thay đổi':'Xuất bản'}</button></div></div>`+(editingPublished?`<div class="card bn" role="note"><b>Lưu ý:</b> Khi lưu, những người mở bài giao sau đó sẽ thấy nội dung mới. Báo cáo và kết quả đã nộp được giữ nguyên, không tự chấm điểm lại. Nếu đang có bài mở, hãy cân nhắc kết thúc bài trước khi sửa lớn.</div>`:'')+coachBubble('review',uiText('Kiểm tra bản nháp trước khi xuất bản','Review your draft before publishing'),uiText('Bạn có thể đổi thứ tự câu, sửa nội dung, nhân đôi hoặc xóa câu. Khi hoàn tất, chọn Xuất bản để đặt tên đề và môn học.','Reorder, edit, duplicate, or delete questions here. When ready, choose Publish to name the quiz and set its subject.'))
 +(d.length?d.map((q,i)=>`<article class="card qi"><span class="lt">${i+1}</span><div class="qb"><div class="chips"><span class="chip">${TYPES[q.type]}</span><span class="chip">${q.time} giây</span><span class="chip">${q.points} điểm</span>${q.type==='sa'?`<span class="chip">Đ/A: ${esc(q.answer)}</span>`:''}</div><p>${esc(richPlain(q.text||q.passage).slice(0,170))}</p>${q.img?`<img class="qimg" src="${q.img}" alt="">`:''}</div><div class="qa"><button class="ib" data-a="up" data-i="${i}" aria-label="Chuyển câu ${i+1} lên"${i?'':' disabled'}>↑</button><button class="ib" data-a="down" data-i="${i}" aria-label="Chuyển câu ${i+1} xuống"${i<d.length-1?'':' disabled'}>↓</button><button class="btn" data-a="edit" data-i="${i}">Sửa</button><button class="btn" data-a="dup" data-i="${i}">Nhân đôi</button><button class="btn" data-a="del" data-c="1" data-i="${i}">Xóa</button></div></article>`).join('')
 :`<div class="card"><h2>Đề nháp đang trống</h2><p class="mu">Thêm câu hỏi bằng nút “+ Thêm câu”.</p></div>`)}
 
@@ -700,12 +758,9 @@ const loc=ms=>new Date(ms-new Date(ms).getTimezoneOffset()*6e4).toISOString().sl
 function joinLink(c){
  let base='';
  if(ON.gas){
-  base=String(ON.webAppUrl||'').split('#')[0].split('?')[0];
-  if(!/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(base)){
-   const current=String(location.href||'').split('#')[0].split('?')[0];
-   if(/^https:\/\/script\.google\.com\/macros\/s\/[^/]+\/exec$/.test(current))base=current;
-   else return '';
-  }
+  // Public invite links point to the standalone website; Apps Script is only the backend.
+  base=String(ON.webAppUrl||getPublicAppBaseUrl()).split('#')[0].split('?')[0];
+  if(!/^https?:\/\//i.test(base))return '';
  }else if(ON.db)base='https://claude.ai/artifact/M5FLSxVYxcThDRAGbVijFD';
  else base=location.href.split('#')[0].split('?')[0];
  return base+'?join='+encodeURIComponent(String(c));
@@ -808,7 +863,7 @@ ${sw('late','Cho phép nộp muộn','Sau hạn học sinh vẫn làm được, 
 <h2 style="margin-top:18px">Cài đặt chính</h2>${row('Số lượt làm bài',four('attempts'))}${p?row('Đưa câu sai trở lại sau',pl('reviewDelay',2,'2 câu')+pl('reviewDelay',3,'3 câu')+pl('reviewDelay',4,'4 câu')+pl('reviewDelay','end','Không giới hạn'))+'<p class="mu">Mọi câu trả lời sai sẽ được đưa trở lại cho đến khi trả lời đúng. “Không giới hạn” sẽ đợi đến lượt ôn ở cuối vòng câu hỏi ban đầu.</p>':''}${A.attempts?'<p class="mu">Số lượt được tính theo tên hiển thị (hoặc mã ẩn danh nếu bật ẩn danh).</p>':''}</section>
 <h2>Thêm cài đặt</h2><div class="tabs" role="tablist">${tb('o','Tổng quan')}${tb('m','Làm chủ')}${tb('g','Game hóa')}</div><section class="card">${panel}</section>
 <button class="btn or" style="width:100%" data-a="agive">Giao bài</button>`}
-function vAssigned(){const a=ON.asg.find(x=>x.id===V.assignedId)||V.a;if(!a)return '<div class="card"><h2>Không tìm thấy bài vừa giao</h2><button class="btn" data-a="go" data-p="lib">Về thư viện đề</button></div>';const link=joinLink(a.id),linkMissing=!link,localHint=linkMissing&&ON.gas?'<p class="erc">Chưa lấy được URL triển khai. Hãy dùng Deploy → Manage deployments và mở Web app URL kết thúc bằng /exec rồi thử lại.</p>':(!ON.db&&location.protocol==='file:'?'<p class="mu">Lưu ý: đang mở file trực tiếp từ máy tính. Liên kết này chỉ mở được trên máy có file; muốn học sinh dùng thiết bị khác, hãy đăng tải trang lên một địa chỉ web trước.</p>':'');return `<div class="hd"><div><h1>Đã giao bài thành công</h1><p class="mu">${esc(a.title)} · chế độ ${modeLabel(a.mode)}</p></div><div class="acts"><button class="btn" data-a="go" data-p="lib">Về thư viện</button><button class="btn or" data-a="rgo" data-f="${a.id}">Xem báo cáo</button></div></div><div class="grid"><section class="card"><h2>Mã tham gia</h2><p class="mu">Học sinh nhập mã này ở trang chủ.</p><input id="d-code" class="codebig" readonly aria-label="Mã tham gia" value="${fmtCode(a.id)}" style="width:100%;padding:12px;border:1px solid var(--bd);border-radius:12px;background:var(--card)"><div class="acts" style="margin-top:12px"><button class="btn or" data-a="cpy" data-t="code">Sao chép mã</button></div></section><section class="card"><h2>Mã QR</h2><div class="qrbox">${link?qrSvg(link):'<p class=\"erc\">Chưa có link Web app /exec để tạo QR.</p>'}</div><p class="mu" style="text-align:center">Quét QR để mở trang tham gia.</p><div class="acts"><button class="btn" data-a="qr" data-id="${a.id}"${linkMissing?' disabled':''}>Mở QR lớn</button></div></section><section class="card"><h2>Liên kết tham gia</h2><p class="mu">Gửi liên kết để học sinh mở trực tiếp bài tập.</p><input id="d-link" readonly aria-label="Liên kết tham gia" value="${esc(link)}" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:12px;background:var(--card)"><div class="acts" style="margin-top:12px"><button class="btn or" data-a="cpy" data-t="link"${linkMissing?' disabled':''}>Sao chép liên kết</button><button class="btn" data-a="rgo" data-f="${a.id}">Xem báo cáo</button></div></section></div>${localHint}<section class="card" style="margin-top:16px"><h2>Bước tiếp theo</h2><p class="mu">Bạn có thể theo dõi danh sách người tham gia, điểm và thời gian làm bài trong trang báo cáo. ${a.anon?'Chế độ ẩn danh đang bật; báo cáo không lưu tên thật.':'Báo cáo ghi nhận tên hiển thị học sinh đã nhập.'} Báo cáo tự làm mới định kỳ khi có kết quả mới.</p><button class="btn or" data-a="rgo" data-f="${a.id}">Mở báo cáo bài này</button></section>`}
+function vAssigned(){const a=ON.asg.find(x=>x.id===V.assignedId)||V.a;if(!a)return '<div class="card"><h2>Không tìm thấy bài vừa giao</h2><button class="btn" data-a="go" data-p="lib">Về thư viện đề</button></div>';const link=joinLink(a.id),linkMissing=!link,localHint=linkMissing&&ON.gas?'<p class="erc">Chưa xác định được địa chỉ website công khai. Hãy mở Quiz Lab từ URL Netlify đã triển khai rồi thử lại.</p>':(!ON.db&&location.protocol==='file:'?'<p class="mu">Lưu ý: đang mở file trực tiếp từ máy tính. Liên kết này chỉ mở được trên máy có file; muốn học sinh dùng thiết bị khác, hãy đăng tải trang lên một địa chỉ web trước.</p>':'');return `<div class="hd"><div><h1>Đã giao bài thành công</h1><p class="mu">${esc(a.title)} · chế độ ${modeLabel(a.mode)}</p></div><div class="acts"><button class="btn" data-a="go" data-p="lib">Về thư viện</button><button class="btn or" data-a="rgo" data-f="${a.id}">Xem báo cáo</button></div></div><div class="grid"><section class="card"><h2>Mã tham gia</h2><p class="mu">Học sinh nhập mã này ở trang chủ.</p><input id="d-code" class="codebig" readonly aria-label="Mã tham gia" value="${fmtCode(a.id)}" style="width:100%;padding:12px;border:1px solid var(--bd);border-radius:12px;background:var(--card)"><div class="acts" style="margin-top:12px"><button class="btn or" data-a="cpy" data-t="code">Sao chép mã</button></div></section><section class="card"><h2>Mã QR</h2><div class="qrbox">${link?qrSvg(link):'<p class=\"erc\">Chưa có link Web app /exec để tạo QR.</p>'}</div><p class="mu" style="text-align:center">Quét QR để mở trang tham gia.</p><div class="acts"><button class="btn" data-a="qr" data-id="${a.id}"${linkMissing?' disabled':''}>Mở QR lớn</button></div></section><section class="card"><h2>Liên kết tham gia</h2><p class="mu">Gửi liên kết để học sinh mở trực tiếp bài tập.</p><input id="d-link" readonly aria-label="Liên kết tham gia" value="${esc(link)}" style="width:100%;padding:10px;border:1px solid var(--bd);border-radius:12px;background:var(--card)"><div class="acts" style="margin-top:12px"><button class="btn or" data-a="cpy" data-t="link"${linkMissing?' disabled':''}>Sao chép liên kết</button><button class="btn" data-a="rgo" data-f="${a.id}">Xem báo cáo</button></div></section></div>${localHint}<section class="card" style="margin-top:16px"><h2>Bước tiếp theo</h2><p class="mu">Bạn có thể theo dõi danh sách người tham gia, điểm và thời gian làm bài trong trang báo cáo. ${a.anon?'Chế độ ẩn danh đang bật; báo cáo không lưu tên thật.':'Báo cáo ghi nhận tên hiển thị học sinh đã nhập.'} Báo cáo tự làm mới định kỳ khi có kết quả mới.</p><button class="btn or" data-a="rgo" data-f="${a.id}">Mở báo cáo bài này</button></section>`}
 function vReport(){
 const head=(t,x,b)=>`<div class="hd"><div><h1>${esc(t)}</h1><p class="mu">${x}</p></div><div class="acts">${b||''}</div></div>`;
 const rf='<button class="btn" data-a="rfresh">Làm mới</button>';
@@ -824,7 +879,7 @@ const st=asgSt(a),open=st==='Đang mở',link=joinLink(a.id),base=link.split('#'
 const rows=[...L].sort((x,y)=>(x.at||0)-(y.at||0));if(V.rank)rows.sort((x,y)=>(y.tot?y.got/y.tot:0)-(x.tot?x.got/x.tot:0)||x.used-y.used);
 const corr=L.reduce((s,x)=>s+x.correct,0),tn=L.reduce((s,x)=>s+x.n,0),low=v=>String(v).toLowerCase();
 const PN=new Set([...ON.pl.filter(p=>p.aid===a.id).map(p=>low(p.name)),...L.map(x=>low(x.name))]),comp=PN.size?Math.round(nst(L)/PN.size*100):0,pend=ON.pl.filter(p=>p.aid===a.id&&!L.some(x=>low(x.name)===low(p.name))).map(p=>esc(p.name));
-return back+localNotice+`<div class="hd"><div><h1>${esc(a.title)} <span class="chip">${open?'● Đang chạy':st==='Chưa mở'?'Chưa mở':'Đã kết thúc'}</span></h1><p class="mu">${modeLabel(a.mode)} · đã bắt đầu ${fmtD(a.start)}</p></div><div class="acts"><button class="btn${V.rank?' or':''}" data-a="rank">${V.rank?'Bỏ xếp hạng':'Xem bảng xếp hạng'}</button>${open?`<button class="btn red" data-a="aclose" data-c="1" data-id="${a.id}">Kết thúc</button>`:''}<button class="btn" data-a="aclear" data-c="1" data-f="${a.id}">Xóa kết quả</button><button class="btn" data-a="adel" data-c="1" data-id="${a.id}">Xóa báo cáo</button></div></div>
+return back+localNotice+`<div class="hd"><div><h1>${esc(a.title)} <span class="chip">${open?'● Đang chạy':st==='Chưa mở'?'Chưa mở':'Đã kết thúc'}</span></h1><p class="mu">${modeLabel(a.mode)} · đã bắt đầu ${fmtD(a.start)}</p></div><div class="acts"><button class="btn${V.rank?' or':''}" data-a="rank">${V.rank?'Bỏ xếp hạng':'Xem bảng xếp hạng'}</button>${ON.edit&&a.quizId?`<button class="btn or" data-a="editpub" data-id="${a.quizId}">Sửa đề gốc</button>`:''}${open?`<button class="btn red" data-a="aclose" data-c="1" data-id="${a.id}">Kết thúc</button>`:''}<button class="btn" data-a="aclear" data-c="1" data-f="${a.id}">Xóa kết quả</button><button class="btn" data-a="adel" data-c="1" data-id="${a.id}">Xóa báo cáo</button></div></div>
 <section class="card"><div class="invh"><div><h2 style="margin:0">Mời người tham gia</h2><span class="mu">Hạn chót: ${fmtD(a.end)} </span><button class="btn" data-a="dledit" data-id="${a.id}" style="padding:2px 10px">Chỉnh sửa</button></div><button class="btn" data-a="invt" aria-expanded="${inv}">${inv?'Thu gọn ▲':'Mở rộng ▼'}</button></div>
 ${inv?`<div class="inv"><div><h2>Tham gia bằng mã</h2><div class="f">BƯỚC 1: Mở trang Quiz Lab giáo viên đã chia sẻ<div class="acts"><input readonly id="d-base" aria-label="Địa chỉ trang" value="${esc(base)}"><button class="btn" data-a="cpy" data-t="base">Sao chép</button></div></div><div class="f">BƯỚC 2: Nhập mã tham gia<div class="acts"><input class="codebig" readonly id="d-code" aria-label="Mã tham gia" value="${fmtCode(a.id)}"><button class="btn" data-a="qr" data-id="${a.id}">Mã QR</button></div></div></div><div><h2>Tham gia bằng liên kết</h2><div class="f">Liên kết tham gia<div class="acts"><input readonly id="d-link" aria-label="Liên kết tham gia" value="${esc(link)}"><button class="btn or" data-a="cpy" data-t="link">Sao chép</button></div></div><a class="btn" style="text-decoration:none;display:inline-block" href="mailto:?subject=${encodeURIComponent('Bài tập: '+a.title)}&body=${encodeURIComponent('Nhập mã '+fmtCode(a.id)+' hoặc mở liên kết: '+link)}">✉ Gửi qua email</a></div></div>`:''}</section>
 <div class="stats" style="margin-top:16px"><div class="card"><b>${tn?Math.round(corr/tn*100):0}%</b>câu đúng</div><div class="card"><b>${avgOf(L).toFixed(1)}</b>điểm trung bình (thang 10)</div><div class="card"><b>${comp}%</b>tỷ lệ hoàn thành</div><div class="card"><b>${PN.size}</b>tổng số học sinh</div><div class="card"><b>${a.n}</b>câu hỏi</div></div>
@@ -911,7 +966,8 @@ return `<div class="play"><div class="card"><div class="medal" aria-hidden="true
 
 /* ---------- Hộp thoại ---------- */
 function dlgHtml(){const d=V.dlg;if(!d)return'';let t,b;
-if(d==='pub'){t='Xuất bản đề';b=`<label class="f">Tên đề<input id="p-t" placeholder="Ví dụ: Toán 12 - Hàm số"></label><div class="row2"><label class="f">Môn<select id="p-s">${SUBJ.map(s=>`<option>${s}</option>`).join('')}</select></label><label class="f">Lớp<select id="p-g">${[...Array(12)].map((_,i)=>`<option${i===11?' selected':''}>${i+1}</option>`).join('')}</select></label></div><p class="mu">${ON.db?'Đề sẽ được phát online: học sinh mở liên kết chia sẻ của trang này là làm được.':'Chế độ xem này chưa bật được chia sẻ online, đề chỉ lưu trên máy này.'}</p><div class="acts" style="margin-top:14px"><button class="btn" data-a="cd">Hủy</button><button class="btn or" data-a="dopub">Xuất bản</button></div>`}
+if(d==='pub'||(d&&d.k==='pub')){const editing=!!(d&&d.k==='pub'&&d.edit),m=editing?(EDITING_PUBLISHED_META||{}):{};t=editing?'Lưu thay đổi đề đã xuất bản':'Xuất bản đề';b=`<label class="f">Tên đề<input id="p-t" placeholder="Ví dụ: Toán 12 - Hàm số" value="${esc(m.title||'')}"></label><div class="row2"><label class="f">Môn<select id="p-s">${SUBJ.map(s=>`<option${m.subject===s?' selected':''}>${s}</option>`).join('')}</select></label><label class="f">Lớp<select id="p-g">${[...Array(12)].map((_,i)=>`<option${String(m.grade||'12')===String(i+1)?' selected':''}>${i+1}</option>`).join('')}</select></label></div>${editing?`<div class="card bn"><b>Đề đã xuất bản:</b> thao tác này cập nhật cùng một đề, không tạo đề mới. Các kết quả đã lưu được giữ nguyên; bài giao đang mở sẽ dùng nội dung mới cho những lượt tải đề sau khi lưu.</div>`:`<p class="mu">${ON.db?'Đề sẽ được phát online: học sinh mở liên kết chia sẻ của trang này là làm được.':'Chế độ xem này chưa bật được chia sẻ online, đề chỉ lưu trên máy này.'}</p>`}<div class="acts" style="margin-top:14px"><button class="btn" data-a="cd">Hủy</button><button class="btn or" data-a="dopub">${editing?'Lưu thay đổi':'Xuất bản'}</button></div>`}
+else if(d.k==='editpub'){const id=String(d.id||''),related=ON.asg.filter(x=>String(x.quizId||'')===id),active=related.filter(x=>asgSt(x)==='Đang mở').length;t='Chỉnh sửa đề đã xuất bản?';b=`<p>Đề này đang được dùng trong <b>${related.length}</b> bài giao/báo cáo${active?`, trong đó <b>${active}</b> bài đang mở`:''}. Nếu tiếp tục, đề gốc sẽ được cập nhật và người mở bài giao sau khi lưu sẽ nhận nội dung mới.</p><p class="mu">Các báo cáo và kết quả đã nộp được giữ nguyên, không tự tính điểm lại. Để tránh thay đổi giữa chừng, nên kết thúc bài đang mở trước khi chỉnh sửa lớn.</p><div class="acts"><button class="btn" data-a="cd">Hủy</button><button class="btn or" data-a="editpubgo">Tiếp tục chỉnh sửa</button></div>`}
 else if(d.k==='done'){t='Đã giao bài';b=`<p>Học sinh nhập mã dưới đây ở trang chủ Quiz Lab, hoặc mở liên kết.</p><label class="f">Mã tham gia<input class="codebig" readonly id="d-code" value="${fmtCode(d.a.id)}"></label><label class="f">Liên kết tham gia<input readonly id="d-link" value="${esc(joinLink(d.a.id))}"></label><div class="acts"><button class="btn or" data-a="cpy" data-t="code">Sao chép mã</button><button class="btn" data-a="cpy" data-t="link">Sao chép liên kết</button></div><div class="acts" style="margin-top:12px"><button class="btn or" data-a="rgo" data-f="${d.a.id}">Xem trang mời học sinh</button><button class="btn" data-a="go" data-p="lib">Đóng</button></div>`}
 else if(d.k==='qr'){t='Mã QR tham gia';b=`<div class="qrbox">${qrSvg(d.u)}</div><p class="mu" style="text-align:center;word-break:break-all">${esc(d.u)}</p><div class="acts"><button class="btn" data-a="cd">Đóng</button></div>`}
 else if(d.k==='dl'){t='Chỉnh sửa hạn nộp';b=`<label class="f">Hạn nộp mới<input type="datetime-local" id="dl-in" value="${loc(d.a.end)}"></label><div class="acts"><button class="btn" data-a="cd">Hủy</button><button class="btn or" data-a="dlsave">Lưu</button></div>`}
@@ -965,6 +1021,9 @@ const csv=String.fromCharCode(65279)+rows.map(r=>r.map(c=>'"'+String(c).replace(
 try{if(typeof claude!=='undefined'&&claude.use){const d=await claude.use('downloads');if(d){await d.save({filename:'bao-cao-quiz-lab.csv',data:csv});return}}const blob=new Blob([csv],{type:'text/csv;charset=utf-8'}),u=URL.createObjectURL(blob),a=document.createElement('a');a.href=u;a.download='bao-cao-quiz-lab.csv';document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),2000)}catch(e){if(!e||e.code!=='declined')toast('Không tải được file')}},
 menu:(d,b)=>{const w=b.closest('.mw'),o=w.classList.toggle('open');b.setAttribute('aria-expanded',o);if(o)w.querySelector('.menu button').focus()},
 new:d=>go('edit',{q:blank(d.t),i:-1}),
+editpub:d=>{if(!ON.edit)return toast('Bạn không có quyền chỉnh sửa đề này.');V.dlg={k:'editpub',id:String(d.id||'')};render()},
+editpubgo:async()=>{const d=V.dlg;if(!d||d.k!=='editpub')return;await loadPublishedForEdit(d.id)},
+canceleditpub:()=>{S.draft=clone(EDITING_PUBLISHED_DRAFT_BACKUP||[]);if(EDITING_PUBLISHED_CACHE_BACKUP){const i=S.quizzes.findIndex(x=>x.id===EDITING_PUBLISHED_ID);if(i>=0)S.quizzes[i]=clone(EDITING_PUBLISHED_CACHE_BACKUP)}save();EDITING_PUBLISHED_ID='';EDITING_PUBLISHED_META=null;EDITING_PUBLISHED_DRAFT_BACKUP=null;EDITING_PUBLISHED_CACHE_BACKUP=null;go('lib');toast('Đã hủy chỉnh sửa; đề đã xuất bản không thay đổi.')},
 cancel:()=>go(S.draft.length?'review':'lib'),
 addi:()=>{sync();V.q.items.push({text:'',answer:true});render('#rows .irow:last-child [data-rich-field]')},
 deli:d=>{sync();V.q.items.splice(+d.i,1);render()},
@@ -975,11 +1034,14 @@ down:d=>{const i=+d.i,a=S.draft;[a[i+1],a[i]]=[a[i],a[i+1]];save();render(`[data
 edit:d=>go('edit',{q:clone(S.draft[+d.i]),i:+d.i}),
 dup:d=>{const c=clone(S.draft[+d.i]);c.id=uid();S.draft.splice(+d.i+1,0,c);save();render();toast('Đã nhân đôi câu hỏi')},
 del:d=>{S.draft.splice(+d.i,1);save();render();toast('Đã xóa câu hỏi')},
-pub:()=>{V.dlg='pub';render()},
+pub:()=>{V.dlg=EDITING_PUBLISHED_ID?{k:'pub',edit:true}:'pub';render()},
 cd:()=>{V.dlg=null;render()},
 dopub:async()=>{const g=id=>document.getElementById(id).value,t=g('p-t').trim();if(!t)return toast('Hãy nhập tên đề');
-const quiz={id:uid(),title:t,subject:g('p-s'),grade:g('p-g'),vis:'p',code:'',retry:false,questions:clone(S.draft),created:Date.now()};S.quizzes.unshift(quiz);save();const published=await pushOnline(quiz);if(ON.gas&&!published){S.quizzes=S.quizzes.filter(x=>x.id!==quiz.id);save();return}
-S.draft=[];save();go('lib');toast('Đã xuất bản “'+t+'”')},
+const editing=!!EDITING_PUBLISHED_ID,editId=EDITING_PUBLISHED_ID,backupCache=clone(EDITING_PUBLISHED_CACHE_BACKUP),backupDraft=clone(EDITING_PUBLISHED_DRAFT_BACKUP||[]),editingQuestions=clone(S.draft||[]);
+const quiz=editing?{...(EDITING_PUBLISHED_META||{}),id:editId,title:t,subject:g('p-s'),grade:g('p-g'),vis:'p',retry:false,questions:clone(S.draft),created:(EDITING_PUBLISHED_META&&EDITING_PUBLISHED_META.created)||Date.now(),updated:Date.now()}:{id:uid(),title:t,subject:g('p-s'),grade:g('p-g'),vis:'p',code:'',retry:false,questions:clone(S.draft),created:Date.now()};
+const cacheIndex=S.quizzes.findIndex(x=>x.id===quiz.id);if(cacheIndex>=0)S.quizzes[cacheIndex]=clone(quiz);else S.quizzes.unshift(clone(quiz));save();V.dlg=null;render();
+const published=await pushOnline(quiz);if(!published){if(editing){const i=S.quizzes.findIndex(x=>x.id===editId);if(backupCache){if(i>=0)S.quizzes[i]=clone(backupCache);else S.quizzes.unshift(clone(backupCache))}else if(i>=0)S.quizzes.splice(i,1);S.draft=editingQuestions;V.dlg={k:'pub',edit:true};save();render()}else{S.quizzes=S.quizzes.filter(x=>x.id!==quiz.id);save();V.dlg='pub';render()}return}
+if(editing){S.draft=backupDraft;EDITING_PUBLISHED_ID='';EDITING_PUBLISHED_META=null;EDITING_PUBLISHED_DRAFT_BACKUP=null;EDITING_PUBLISHED_CACHE_BACKUP=null;save();go('lib');toast('Đã lưu thay đổi cho đề “'+t+'”. Báo cáo và kết quả cũ vẫn được giữ nguyên.')}else{S.draft=[];save();go('lib');toast('Đã xuất bản “'+t+'”')}},
 delq:async d=>{await delOnline(d.id);S.quizzes=S.quizzes.filter(z=>z.id!==d.id);save();render();toast('Đã xóa đề')},
 play:d=>{V.dlg={k:'code',id:d.id,mode:d.mode};render()},
 docode:()=>{const z=Q(V.dlg.id),m=V.dlg.mode,g=id=>document.getElementById(id),nm=g('c-nm')?g('c-nm').value.trim():'';
@@ -1060,7 +1122,7 @@ document.addEventListener('click',e=>{const b=e.target.closest('[data-a]');
 document.querySelectorAll('.mw.open').forEach(w=>{if(!w.contains(e.target)){w.classList.remove('open');w.querySelector('[data-a=menu]').setAttribute('aria-expanded','false')}});
 if(!b)return;
 if(b.dataset.c&&!b.dataset.sure){b.dataset.sure=1;const t=b.textContent;b.textContent='Chắc chắn?';setTimeout(()=>{b.textContent=t;delete b.dataset.sure},3000);return}
-const action=b.dataset.a;if(['dopub','assign','agive','join','joinlink','docode','asgo','jgo','lgo','delq','adel','aclear','xdel'].includes(action)){runWithLoading(action,()=>act[action](b.dataset,b));return}act[action](b.dataset,b)});
+const action=b.dataset.a;if(['dopub','editpubgo','assign','agive','join','joinlink','docode','asgo','jgo','lgo','delq','adel','aclear','xdel'].includes(action)){runWithLoading(action,()=>act[action](b.dataset,b));return}act[action](b.dataset,b)});
 
 /* Phím tắt toàn cục & trong lúc làm bài */
 document.addEventListener('keydown',e=>{
