@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <title>Quiz Lab logo</title>
+  <desc>Orange flame-leaf surrounding a dark green checklist with a white check mark.</desc>
+  <!-- Orange leaf/flame silhouette -->
+  <path d="M82 348 C58 289 69 221 112 166 C161 104 251 82 328 67 C374 58 414 42 442 23 C445 75 433 118 410 157 C444 207 454 270 430 326 C402 393 336 443 259 455 C190 466 124 438 89 390 C118 402 150 398 177 380 C139 381 105 368 82 348 Z" fill="#FF6A1A"/>
+  <!-- Small cutout accent creates the leaf/flame sweep -->
+  <path d="M113 339 C117 281 151 231 203 202 C247 178 301 167 350 147 C326 190 286 222 239 242 C190 264 157 299 146 339 C138 359 132 374 119 387 C122 367 119 352 113 339 Z" fill="#E95312" opacity="0.88"/>
+  <!-- Checklist panel -->
+  <rect x="135" y="147" width="267" height="275" rx="45" fill="#103D30" stroke="#F7F6EF" stroke-width="9" transform="rotate(-4 268 284)"/>
+  <!-- Check mark -->
+  <path d="M196 235 L230 268 L292 204" fill="none" stroke="#FFFFFF" stroke-width="23" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Three simple answer rows -->
+  <circle cx="191" cy="315" r="9" fill="#FF6A1A"/>
+  <path d="M216 315 H337" stroke="#FFFFFF" stroke-width="13" stroke-linecap="round"/>
+  <circle cx="191" cy="354" r="9" fill="#FF6A1A"/>
+  <path d="M216 354 H320" stroke="#FFFFFF" stroke-width="13" stroke-linecap="round"/>
+  <circle cx="191" cy="393" r="9" fill="#FF6A1A"/>
+  <path d="M216 393 H300" stroke="#FFFFFF" stroke-width="13" stroke-linecap="round"/>
+</svg>
